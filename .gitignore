@@ -1,2 +1,14 @@
-venv
+
+#backend
+backend/venv
 backend/.env
+backend/__pycache__
+
+#frontend 
+frontend/node_modules
+frontend/.env
+
+avatar-livekit/venv
+avatar-livekit/.env
+
+venv
