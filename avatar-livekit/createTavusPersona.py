@@ -3,14 +3,14 @@ import requests
 url = "https://tavusapi.com/v2/personas"
 
 payload = {
-    "persona_name": "Life Coach",
-    "system_prompt": "As a Life Coach, you are a dedicated professional who specializes in...",
+    "persona_name": "test3",
+    # "system_prompt": "As a Life Coach, you are a dedicated professional who specializes in...",
     "pipeline_mode": "echo",
-    "context": "Here are a few times that you have helped an individual make a breakthrough in...",
+    # "context": "Here are a few times that you have helped an individual make a breakthrough in...",
     "default_replica_id": "r79e1c033f",
     "layers": {
         "transport": {
-        "transport_type": "livekit"
+            "transport_type": "livekit"
         },
         # "llm": {
         #     "model": "<string>",
@@ -86,7 +86,7 @@ payload = {
     }
 }
 headers = {
-    "x-api-key": "aa397fc44131439fba2eef17ea0b4851",
+    "x-api-key": "bd1ba58aab254f31b4a2d028c5a4babe",
     "Content-Type": "application/json"
 }
 

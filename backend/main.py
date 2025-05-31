@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Global variable to store the latest analysis data
+latest_analyzed_sections: Optional[List[dict]] = None
+
 logger.info("Starting ai singing assistant API")
 
 # Configure CORS
@@ -98,6 +101,10 @@ def detect_pitch_from_audio(audio_data: np.ndarray, sr: int = SAMPLE_RATE) -> Li
         # Create pitch data
         pitch_data = []
         for t, pitch in zip(times, f0):
+            # Cap pitch at 350 Hz if it exceeds that value
+            if not np.isnan(pitch) and pitch > 350:
+                pitch = 350.0
+            
             pitch_data.append({
                 "timestamp": float(t),
                 "pitch": float(pitch) if not np.isnan(pitch) else None
@@ -156,22 +163,51 @@ def find_problem_sections(comparisons: List[dict], threshold: float = 30.0, prob
             comparisons : its the return data from the compare_pitches function
             threshold : its the threshold of deviation to consider a section as a problem section to give feedback to the user
     """
+    
     problem_sections = []
     current_section = None
     
     for comp in comparisons:
         if comp['deviation_percentage'] is not None and comp['deviation_percentage'] > threshold:
             if current_section is None:
+                # Determine direction of deviation
+                ref_pitch = comp.get('reference_pitch')
+                user_pitch = comp.get('user_pitch')
+                if ref_pitch is not None and user_pitch is not None:
+                    direction = 'above' if user_pitch > ref_pitch else 'below'
+                else:
+                    direction = 'unknown'
+                # Start a new problem section with direction
                 current_section = {
                     'start_time': comp['timestamp'],
                     'end_time': comp['timestamp'],
-                    'avg_deviation': comp['deviation_percentage']
+                    'avg_deviation': comp['deviation_percentage'],
+                    'direction': direction
                 }
             else:
-                current_section['end_time'] = comp['timestamp']
-                current_section['avg_deviation'] = (
-                    current_section['avg_deviation'] + comp['deviation_percentage']
-                ) / 2
+                # Determine direction for this comparison point
+                ref_pitch = comp.get('reference_pitch')
+                user_pitch = comp.get('user_pitch')
+                if ref_pitch is not None and user_pitch is not None:
+                    comp_direction = 'above' if user_pitch > ref_pitch else 'below'
+                else:
+                    comp_direction = 'unknown'
+                if comp_direction == current_section['direction']:
+                    # Same direction: extend current section
+                    current_section['end_time'] = comp['timestamp']
+                    current_section['avg_deviation'] = (
+                        current_section['avg_deviation'] + comp['deviation_percentage']
+                    ) / 2
+                else:
+                    # Direction changed: close previous section and start a new one
+                    if current_section['end_time'] - current_section['start_time'] > problem_duration:
+                        problem_sections.append(current_section)
+                    current_section = {
+                        'start_time': comp['timestamp'],
+                        'end_time': comp['timestamp'],
+                        'avg_deviation': comp['deviation_percentage'],
+                        'direction': comp_direction
+                    }
         else:
             if current_section is not None:
                 # Only add sections longer than problem_duration seconds
@@ -204,6 +240,33 @@ async def get_song(filename: str):
 async def send_problem_sections(problem_sections: List[dict]):
     """Send problem sections to backend"""
     return {"message": "Problem sections received", "problem_sections": problem_sections}
+
+@app.post("/analyze-performance")
+async def analyze_performance_endpoint(problem_sections_payload: List[dict]):
+    """Analyzes performance data and returns problem sections."""
+    logger.info(f"Received problem sections for analysis: {problem_sections_payload}")
+
+    # The `problem_sections_payload` is the `problemSections` from the frontend.
+    # The backend function `find_problem_sections` expects a list of comparison objects.
+    # The frontend's `problemSections` state is populated with items from `data.comparisons` where deviation > 30.
+    # So, `problemSections` on the frontend IS a list of comparison-like objects (subset of them).
+    analyzed_sections = find_problem_sections(problem_sections_payload) 
+    # The original request was to print the response.
+    print("Analyzed performance sections:", analyzed_sections)
+    
+    # Store the analyzed sections globally
+    global latest_analyzed_sections
+    latest_analyzed_sections = analyzed_sections
+    
+    return {"message": "Performance analyzed", "analyzed_sections": analyzed_sections}
+
+@app.get("/get-latest-analysis")
+async def get_latest_analysis_data():
+    """Get the latest analyzed performance data"""
+    global latest_analyzed_sections
+    if latest_analyzed_sections is None:
+        raise HTTPException(status_code=404, detail="No analysis data available yet.")
+    return {"analyzed_sections": latest_analyzed_sections}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
