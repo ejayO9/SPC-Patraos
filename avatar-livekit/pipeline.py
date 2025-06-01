@@ -30,6 +30,13 @@ def fetch_analysis_data():
         response = requests.get("http://localhost:8000/get-latest-analysis")
         response.raise_for_status()  # Raise an exception for HTTP errors
         return response.json().get("analyzed_sections", [])
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            print("No analysis data available yet - waiting for first performance")
+            return []  # Expected when no performance has been analyzed yet
+        else:
+            print(f"HTTP error fetching analysis data: {e}")
+            return []
     except requests.exceptions.RequestException as e:
         print(f"Error fetching analysis data: {e}")
         return [] # Return empty list or handle error as appropriate
@@ -43,7 +50,10 @@ class Assistant(Agent):
             pitch_analysis_data = pitch_analysis_data[:3]
             
         #calculate the avg_deviation of the pitch_analysis_data
-        avg_deviation = sum(section['avg_deviation'] for section in pitch_analysis_data) / len(pitch_analysis_data)
+        if len(pitch_analysis_data) > 0:
+            avg_deviation = sum(section['avg_deviation'] for section in pitch_analysis_data) / len(pitch_analysis_data)
+        else:
+            avg_deviation = 0
         # Convert the data to a string format for the prompt
         pitch_analysis_str = "\n".join([str(section) for section in pitch_analysis_data])
         
