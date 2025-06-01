@@ -13,6 +13,7 @@ import base64
 import logging
 from fastapi import HTTPException
 from livekit_token_generator import generate_livekit_token
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -230,6 +231,23 @@ async def get_reference_pitch():
     """Get the reference pitch data"""
     return reference_pitch_data
 
+@app.get("/lyrics")
+async def get_lyrics():
+    """Get the lyrics data with timing information"""
+    try:
+        # You should replace 'song_lyrics.json' with the actual lyrics file for your song
+        with open('song_lyrics.json', 'r', encoding='utf-8') as f:
+            lyrics_data = json.load(f)
+        return lyrics_data
+    except FileNotFoundError:
+        # Return example lyrics if the actual file doesn't exist
+        with open('example_lyrics.json', 'r', encoding='utf-8') as f:
+            lyrics_data = json.load(f)
+        return lyrics_data
+    except Exception as e:
+        logger.error(f"Error loading lyrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load lyrics")
+
 @app.get("/song/{filename}")
 async def get_song(filename: str):
     """Serve the song file"""
@@ -244,15 +262,87 @@ async def send_problem_sections(problem_sections: List[dict]):
 @app.post("/analyze-performance")
 async def analyze_performance_endpoint(problem_sections_payload: List[dict]):
     """Analyzes performance data and returns problem sections."""
-    logger.info(f"Received problem sections for analysis: {problem_sections_payload}")
+    logger.info(f"Received problem sections for analysis: {len(problem_sections_payload)} problem points")
 
-    # The `problem_sections_payload` is the `problemSections` from the frontend.
-    # The backend function `find_problem_sections` expects a list of comparison objects.
-    # The frontend's `problemSections` state is populated with items from `data.comparisons` where deviation > 30.
-    # So, `problemSections` on the frontend IS a list of comparison-like objects (subset of them).
-    analyzed_sections = find_problem_sections(problem_sections_payload) 
-    # The original request was to print the response.
-    print("Analyzed performance sections:", analyzed_sections)
+    # Group consecutive problem points into sections
+    if not problem_sections_payload:
+        return {"message": "No problems found", "analyzed_sections": []}
+    
+    # Sort by timestamp
+    sorted_problems = sorted(problem_sections_payload, key=lambda x: x['timestamp'])
+    
+    analyzed_sections = []
+    current_section = None
+    
+    for problem in sorted_problems:
+        if current_section is None:
+            # Start a new section
+            ref_pitch = problem.get('reference_pitch')
+            user_pitch = problem.get('user_pitch')
+            if ref_pitch is not None and user_pitch is not None:
+                direction = 'above' if user_pitch > ref_pitch else 'below'
+            else:
+                direction = 'unknown'
+                
+            current_section = {
+                'start_time': problem['timestamp'],
+                'end_time': problem['timestamp'],
+                'avg_deviation': problem['deviation_percentage'],
+                'direction': direction,
+                'count': 1
+            }
+        else:
+            # Check if this is part of the same section (within 0.5 seconds)
+            if problem['timestamp'] - current_section['end_time'] <= 0.5:
+                # Extend current section
+                current_section['end_time'] = problem['timestamp']
+                # Calculate running average
+                current_section['avg_deviation'] = (
+                    (current_section['avg_deviation'] * current_section['count'] + problem['deviation_percentage']) / 
+                    (current_section['count'] + 1)
+                )
+                current_section['count'] += 1
+            else:
+                # Gap too large, save current section and start new one
+                if current_section['end_time'] - current_section['start_time'] >= 0.5:
+                    # Only save sections that are at least 0.5 seconds long
+                    analyzed_sections.append({
+                        'start_time': current_section['start_time'],
+                        'end_time': current_section['end_time'],
+                        'avg_deviation': current_section['avg_deviation'],
+                        'direction': current_section['direction']
+                    })
+                
+                # Start new section
+                ref_pitch = problem.get('reference_pitch')
+                user_pitch = problem.get('user_pitch')
+                if ref_pitch is not None and user_pitch is not None:
+                    direction = 'above' if user_pitch > ref_pitch else 'below'
+                else:
+                    direction = 'unknown'
+                    
+                current_section = {
+                    'start_time': problem['timestamp'],
+                    'end_time': problem['timestamp'],
+                    'avg_deviation': problem['deviation_percentage'],
+                    'direction': direction,
+                    'count': 1
+                }
+    
+    # Don't forget the last section
+    if current_section and current_section['end_time'] - current_section['start_time'] >= 0.5:
+        analyzed_sections.append({
+            'start_time': current_section['start_time'],
+            'end_time': current_section['end_time'],
+            'avg_deviation': current_section['avg_deviation'],
+            'direction': current_section['direction']
+        })
+    
+    # Log the results
+    logger.info(f"Analyzed performance sections: {len(analyzed_sections)} problem sections found")
+    for section in analyzed_sections:
+        logger.info(f"  Section: {section['start_time']:.1f}s - {section['end_time']:.1f}s, "
+                   f"avg deviation: {section['avg_deviation']:.1f}%, direction: {section['direction']}")
     
     # Store the analyzed sections globally
     global latest_analyzed_sections
@@ -349,12 +439,16 @@ class TokenRequest(BaseModel):
 @app.post("/generate-livekit-token")
 async def generate_token(request: TokenRequest):
     try:
+        # Just generate the token without trying to create the room
+        # The agent will handle room creation/joining when it connects
         token = generate_livekit_token(
             room_name=request.room_name,
             participant_name=request.participant_name
         )
+        logger.info(f"Generated token for room: {request.room_name}, participant: {request.participant_name}")
         return {"token": token}
     except Exception as e:
+        logger.error(f"Error generating token: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

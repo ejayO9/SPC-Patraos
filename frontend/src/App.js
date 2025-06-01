@@ -2,13 +2,16 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import AvatarAgent from './AvatarAgent';
+// import AvatarAgent from './AvatarAgent'; // Removed as we'll use LiveKitRoom directly
+import KaraokeLyrics from './KaraokeLyrics';
+import { LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
+import '@livekit/components-styles';
 
 const BACKEND_URL = 'http://localhost:8000';
 const WS_URL = 'ws://localhost:8000/ws';
 
 // LiveKit configuration - replace with your actual values
-const LIVEKIT_SERVER_URL = process.env.REACT_APP_LIVEKIT_SERVER_URL || 'wss://your-livekit-server.com';
+const LIVEKIT_SERVER_URL = process.env.REACT_APP_LIVEKIT_SERVER_URL || 'wss://test9981-isoxrd05.livekit.cloud';
 const LIVEKIT_API_KEY = process.env.REACT_APP_LIVEKIT_API_KEY || 'your-api-key';
 const LIVEKIT_API_SECRET = process.env.REACT_APP_LIVEKIT_API_SECRET || 'your-api-secret';
 
@@ -53,6 +56,7 @@ function App() {
   const [consecutiveGoodCount, setConsecutiveGoodCount] = useState(0);
   const [consecutiveBadCount, setConsecutiveBadCount] = useState(0);
   const [isMemeCycleActive, setIsMemeCycleActive] = useState(false);
+  const [memeQueue, setMemeQueue] = useState([]);
 
   const audioRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -123,65 +127,51 @@ function App() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'pitch_update') {
-          // Update user pitch data (this part is always active)
-          const newUserPitch = data.user_pitch.map(point => ({
+          // Update user pitch data
+          const adjustedPitchData = data.user_pitch.map(point => ({
             ...point,
             timestamp: point.timestamp + data.time_offset
           }));
-          setUserPitchData(prev => [...prev, ...newUserPitch]);
+          setUserPitchData(prevData => [...prevData, ...adjustedPitchData]);
 
-          // Only process comparisons for memes if no meme cycle is active
+          // Find problems in comparisons
+          const problems = data.comparisons.filter(c => 
+            c.deviation_percentage !== null && c.deviation_percentage > 30
+          );
+
+          // Add problems to problemSections state
+          setProblemSections(prevSections => [...prevSections, ...problems]);
+          
+          // Log for debugging
+          if (problems.length > 0) {
+            console.log(`Found ${problems.length} problem points at time ${data.time_offset}`, problems);
+          }
+
+          // Meme trigger logic only when not in a meme cycle
           if (!isMemeCycleActive) {
-            const problems = data.comparisons.filter(comp =>
-              comp.deviation_percentage && comp.deviation_percentage > 30
-            );
-
             if (problems.length > 0) {
               const newBadCount = consecutiveBadCount + problems.length;
               setConsecutiveBadCount(newBadCount);
               setConsecutiveGoodCount(0); // Reset good count on any problem
 
-              if (newBadCount >= 20 && badMemes.length > 0) { // isMemeCycleActive is false here
-                setIsMemeCycleActive(true); // Start meme cycle, stop counting
+              if (newBadCount >= 20 && badMemes.length > 0) {
+                // Add to queue instead of immediately showing
                 const randomMeme = badMemes[Math.floor(Math.random() * badMemes.length)];
-                setCurrentMeme(randomMeme);
-                setShowMeme(true);
-                setConsecutiveBadCount(0); // Reset count *after* triggering for next cycle
-                
-                setTimeout(() => { // Meme visible duration (3s)
-                  setShowMeme(false); // Start fade-out
-                  setTimeout(() => { // Fade-out animation duration (0.5s)
-                    // Meme has faded out, now start cooldown
-                    setTimeout(() => { // Cooldown duration (2s)
-                      setIsMemeCycleActive(false); // End of meme cycle, counting can resume
-                    }, 2000); // 2s cooldown
-                  }, 500); // 0.5s animation
-                }, 1500); // 3s visible
+                setMemeQueue(prev => [...prev, { meme: randomMeme, type: 'bad' }]);
+                setConsecutiveBadCount(0); // Reset count
               }
             } else { // No problems in this batch of comparisons
               const newGoodCount = consecutiveGoodCount + data.comparisons.length;
               setConsecutiveGoodCount(newGoodCount);
-              // Bad count is already 0 or was reset by a previous problem batch
-              // setConsecutiveBadCount(0); // No need to reset bad if it's already being reset by problems
 
-              if (newGoodCount >= 20 && goodMemes.length > 0) { // isMemeCycleActive is false here
-                setIsMemeCycleActive(true); // Start meme cycle, stop counting
+              if (newGoodCount >= 20 && goodMemes.length > 0) {
+                // Add to queue instead of immediately showing
                 const randomMeme = goodMemes[Math.floor(Math.random() * goodMemes.length)];
-                setCurrentMeme(randomMeme);
-                setShowMeme(true);
-                setConsecutiveGoodCount(0); // Reset count *after* triggering for next cycle
-
-                setTimeout(() => { // Meme visible duration (3s)
-                  setShowMeme(false); // Start fade-out
-                  setTimeout(() => { // Fade-out animation (0.5s)
-                    setTimeout(() => { // Cooldown (2s)
-                      setIsMemeCycleActive(false); // End of cycle, counting can resume
-                    }, 2000); // 2s cooldown
-                  }, 500); // 0.5s animation
-                }, 3000); // 3s visible
+                setMemeQueue(prev => [...prev, { meme: randomMeme, type: 'good' }]);
+                setConsecutiveGoodCount(0); // Reset count
               }
             }
-          } // End of if (!isMemeCycleActive)
+          }
         } else if (data.type === 'performance_complete') {
           setPerformanceComplete(true);
           console.log('Received performance_complete, closing WebSocket');
@@ -200,6 +190,36 @@ function App() {
       };
     }
   }, [isRecording]);
+
+  // Effect to process meme queue
+  useEffect(() => {
+    // Only process queue if no meme is currently active and queue has items
+    if (!isMemeCycleActive && !showMeme && memeQueue.length > 0) {
+      const nextMeme = memeQueue[0];
+      setIsMemeCycleActive(true);
+      
+      // Set the meme and show it
+      setCurrentMeme(nextMeme.meme);
+      setShowMeme(true);
+      
+      // Remove from queue
+      setMemeQueue(prev => prev.slice(1));
+      
+      // Duration based on meme type
+      const visibleDuration = nextMeme.type === 'bad' ? 1500 : 3000;
+      
+      setTimeout(() => {
+        setShowMeme(false); // Start fade-out
+        setTimeout(() => {
+          // After fade-out, clear current meme and start cooldown
+          setCurrentMeme(null);
+          setTimeout(() => {
+            setIsMemeCycleActive(false); // End of cycle
+          }, 2000); // 2s cooldown
+        }, 500); // 0.5s fade animation
+      }, visibleDuration);
+    }
+  }, [isMemeCycleActive, showMeme, memeQueue]);
 
   // Audio playback time update
   useEffect(() => {
@@ -345,9 +365,13 @@ function App() {
 
   const analyzePerformance = useCallback(async () => {
     try {
-      console.log("analyzePerformance called. problemSections:", problemSections);
+      console.log("analyzePerformance called. Total problemSections:", problemSections.length);
+      console.log("First few problem sections:", problemSections.slice(0, 5));
+      
       const response = await axios.post(`${BACKEND_URL}/analyze-performance`, problemSections);
       console.log('Performance analysis response:', response.data);
+      console.log('Analyzed sections received:', response.data.analyzed_sections);
+      
       setAnalyzedSections(response.data.analyzed_sections);
     } catch (error) {
       console.error('Error analyzing performance:', error);
@@ -357,10 +381,20 @@ function App() {
   // Effect to run analysis when performance is complete and recording has stopped
   useEffect(() => {
     if (performanceComplete && !isRecording) {
-      console.log("useEffect: performanceComplete is true and isRecording is false. Calling analyzePerformance.");
+      console.log("useEffect: performanceComplete is true and isRecording is false. Calling analyzePerformance and showing avatar.");
       analyzePerformance();
+      // Automatically try to show avatar when performance is complete
+      if (!liveKitToken) {
+        generateDemoToken().then(token => {
+          if (token) {
+            setShowAvatar(true);
+          }
+        });
+      } else {
+        setShowAvatar(true);
+      }
     }
-  }, [performanceComplete, isRecording, analyzePerformance]);
+  }, [performanceComplete, isRecording, analyzePerformance, liveKitToken]); // Added liveKitToken to dependencies
 
   // Prepare data for visualization
   const prepareChartData = () => {
@@ -486,16 +520,6 @@ function App() {
     return processedData;
   };
 
-  const handleShowAvatarClick = async () => {
-    let currentToken = liveKitToken;
-    if (!currentToken) {
-      currentToken = await generateDemoToken();
-    }
-    if (currentToken) {
-      setShowAvatar(true);
-    }
-  };
-
   const chartData = prepareChartData();
 
   return (
@@ -518,8 +542,9 @@ function App() {
           <button
             onClick={isRecording ? stopPerformance : startPerformance}
             className={`control-button ${isRecording ? 'stop' : 'start'}`}
+            disabled={(performanceComplete && !isRecording) && showAvatar}
           >
-            {isRecording ? 'Stop Performance' : 'Start Performance'}
+            {isRecording ? 'Stop Performance' : (performanceComplete ? 'Start New Performance' : 'Start Performance')}
           </button>
 
           <div className="time-display">
@@ -534,30 +559,45 @@ function App() {
             {/* TODO: Implement webcam feed here */}
             <video ref={webcamVideoRef} autoPlay playsInline muted className="webcam-video-element"></video>
           </div>
+          {/* Karaoke Lyrics Display moved here */}
+          <KaraokeLyrics 
+            currentTime={currentTime >= 2 ? currentTime - 2 : 0} 
+            isPlaying={isPlaying}
+          />
         </div>
 
         {/* Visualization Container - Contains Avatar and Pitch Visualizer */}
         <div className="visualization-container">
-          {/* Avatar Agent Section - Positioned absolutely within visualization-container */}
           <div className="avatar-section-container">
-            {showAvatar && liveKitToken ? (
-              <AvatarAgent
+            {liveKitToken && showAvatar && (
+              <LiveKitRoom
                 token={liveKitToken}
                 serverUrl={LIVEKIT_SERVER_URL}
-              />
-            ) : (
-              <div className="avatar-placeholder">
-                <button
-                  className="show-avatar-button-inline"
-                  onClick={handleShowAvatarClick}
-                >
-                  Show AI Assistant
-                </button>
-              </div>
+                connect={true}
+                video={false}
+                audio={false}
+                onConnected={() => console.log('Connected to LiveKit Room for agent feedback')}
+                onDisconnected={(reason) => console.log('Disconnected from LiveKit Room:', reason)}
+                onError={(error) => console.error('LiveKit Room Error:', error)}
+                style={{ display: 'none' }}
+              >
+                <RoomAudioRenderer />
+              </LiveKitRoom>
             )}
+            {/* Always show Anu Malik image, make it bigger */}
+            <img 
+              src="/anu2.png" 
+              alt="Anu Malik" 
+              className="anu-malik-image" 
+              style={{ 
+                width: '80%',  // Make it bigger
+                height: '80%', 
+                objectFit: 'contain',
+                margin: 'auto'
+              }} 
+            />
           </div>
           
-          {/* Meme Display - Moved inside central-area */}
           {currentMeme && (
             <div className={`meme-popup ${showMeme ? '' : 'hide'}`}>
               <img src={currentMeme} alt="meme" className="meme-image" />
@@ -565,9 +605,6 @@ function App() {
           )}
         </div>
 
-        {/* Controls - Below Central Area, Above Pitch Graph */}
-
-          {/* Pitch Visualizer - Bottom */}
           <div className="pitch-visualizer-container">
             <ResponsiveContainer width="100%" height={250}>
               <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
@@ -585,9 +622,7 @@ function App() {
                   labelFormatter={(value) => `Time: ${formatTime(value)}`}
                   formatter={(value) => value ? `${value.toFixed(1)} Hz` : 'N/A'}
                 />
-
                 <ReferenceLine x={currentTime} stroke="#FF0080" strokeWidth={3} strokeDasharray="5 5" />
-
                 <Line
                   type="monotone"
                   dataKey="reference"
@@ -597,7 +632,6 @@ function App() {
                   connectNulls={false}
                   name="Original"
                 />
-
                 <Line
                   type="monotone"
                   dataKey="user"
@@ -627,7 +661,7 @@ function App() {
                 </ul>
               </div>
             ) : (
-              <p>Great job! Your pitch accuracy was excellent!</p>
+              !showAvatar && <p>Great job! Your pitch accuracy was excellent!</p>
             )}
           </div>
         )}
